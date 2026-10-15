@@ -24,6 +24,7 @@
   <input type="file" id="file" accept="application/pdf">
   <button id="detect" disabled>Detect Tables</button>
   <label><input type="checkbox" id="showCells" checked><span class="sw" style="background:#e53935"></span>Cells</label>
+  <label><input type="checkbox" id="showMerged" checked><span class="sw" style="background:#ff9800"></span>Merged cells</label>
   <label><input type="checkbox" id="showLabels" checked><span class="sw" style="background:#e53935"></span>Labels</label>
   <span id="status">Choose a PDF to begin.</span>
 </header>
@@ -36,8 +37,9 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
 
 const SCALE = 1.5;
 const RED = "#e53935";
-const COLORS = { table: RED, cell: RED };
-const WIDTH = { table: 5, cell: 2.5 };
+const MERGED = "#ff9800";            // orange outline for merged cells
+const MERGED_FILL = "rgba(255,152,0,0.12)";
+const WIDTH = { table: 5, cell: 2.5, merged: 4 };
 const $ = id => document.getElementById(id);
 let currentFile = null;
 let pageInfo = [];
@@ -93,8 +95,10 @@ $("detect").addEventListener("click", async () => {
     if (!res.ok) throw new Error(data.error || res.statusText);
     lastResult = data;
     draw();
+    const merged = data.tables.reduce(
+      (n, t) => n + t.cells.filter(c => c.rowspan > 1 || c.colspan > 1).length, 0);
     $("status").textContent = data.tables.length
-      ? `Found ${data.tables.length} table(s).`
+      ? `Found ${data.tables.length} table(s), ${merged} merged cell(s).`
       : "No tables found.";
   } catch (err) {
     $("status").textContent = "Error: " + err.message;
@@ -103,7 +107,7 @@ $("detect").addEventListener("click", async () => {
   }
 });
 
-["showCells", "showLabels"].forEach(id => $(id).addEventListener("change", draw));
+["showCells", "showMerged", "showLabels"].forEach(id => $(id).addEventListener("change", draw));
 
 function tag(ctx, text, x, y, color) {
   ctx.font = "bold 14px sans-serif";
@@ -114,38 +118,68 @@ function tag(ctx, text, x, y, color) {
   ctx.fillText(text, x + 4, y + 14);
 }
 
+// Pixel-aligned rectangle path from a bbox (PDF points -> canvas px)
+function rectOf(bb, s) {
+  const x = Math.round(bb.x0 * s), y = Math.round(bb.top * s);
+  const w = Math.round(bb.x1 * s) - x, h = Math.round(bb.bottom * s) - y;
+  return { x, y, w, h };
+}
+
+function isMerged(c) { return (c.rowspan || 1) > 1 || (c.colspan || 1) > 1; }
+
 function draw() {
   pageInfo.forEach(p => p.ctx.clearRect(0, 0, p.w, p.h));
   if (!lastResult) return;
-  const showCells = $("showCells").checked, showLabels = $("showLabels").checked;
+  const showCells = $("showCells").checked;
+  const showMerged = $("showMerged").checked;
+  const showLabels = $("showLabels").checked;
   const s = SCALE;
 
   for (const t of lastResult.tables) {
     const p = pageInfo[t.page_number - 1];
     if (!p) continue;
     const ctx = p.ctx;
-    const b = t.bbox;
+    ctx.lineJoin = "miter";
+    ctx.setLineDash([]);
 
-    // each cell: red rectangle (separator lines between cells)
+    // 1) normal cells first (red)
     if (showCells) {
       ctx.lineWidth = WIDTH.cell;
-      ctx.strokeStyle = COLORS.cell;
-      ctx.setLineDash([]);
+      ctx.strokeStyle = RED;
       for (const c of t.cells) {
-        const cb = c.bbox;
-        ctx.strokeRect(cb.x0 * s, cb.top * s,
-                       (cb.x1 - cb.x0) * s, (cb.bottom - cb.top) * s);
+        if (isMerged(c)) continue;
+        const r = rectOf(c.bbox, s);
+        ctx.strokeRect(r.x, r.y, r.w, r.h);
       }
     }
 
-    // overall table box
+    // 2) merged cells LAST so neighbouring cell lines never overdraw them:
+    //    light tint + thick outline drawn fully inside the cell boundary
+    if (showMerged) {
+      const inset = WIDTH.merged / 2;
+      for (const c of t.cells) {
+        if (!isMerged(c)) continue;
+        const r = rectOf(c.bbox, s);
+        const x = r.x + inset, y = r.y + inset;
+        const w = r.w - 2 * inset, h = r.h - 2 * inset;
+        if (w <= 0 || h <= 0) continue;
+        ctx.fillStyle = MERGED_FILL;
+        ctx.fillRect(x, y, w, h);
+        ctx.lineWidth = WIDTH.merged;
+        ctx.strokeStyle = MERGED;
+        ctx.strokeRect(x, y, w, h);
+      }
+    }
+
+    // 3) overall table box (red)
+    const b = rectOf(t.bbox, s);
     ctx.lineWidth = WIDTH.table;
-    ctx.strokeStyle = COLORS.table;
-    ctx.strokeRect(b.x0 * s, b.top * s, (b.x1 - b.x0) * s, (b.bottom - b.top) * s);
+    ctx.strokeStyle = RED;
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
 
     if (showLabels) {
       const label = `${t.table_id}  ${t.row_count}×${t.column_count}`;
-      tag(ctx, label, b.x0 * s, Math.max(0, b.top * s - 22), COLORS.table);
+      tag(ctx, label, b.x, Math.max(0, b.y - 22), RED);
     }
   }
 }
