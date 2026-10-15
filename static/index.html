@@ -23,7 +23,7 @@
 <header>
   <input type="file" id="file" accept="application/pdf">
   <button id="detect" disabled>Detect Tables</button>
-  <label><input type="checkbox" id="showCells" checked><span class="sw" style="background:#111"></span>Cells</label>
+  <label><input type="checkbox" id="showCells" checked><span class="sw" style="background:#e53935"></span>Cells</label>
   <label><input type="checkbox" id="showLabels" checked><span class="sw" style="background:#e53935"></span>Labels</label>
   <span id="status">Choose a PDF to begin.</span>
 </header>
@@ -35,7 +35,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs";
 
 const SCALE = 1.5;
-const COLORS = { table: "#e53935", cell: "#111111" };
+const RED = "#e53935";
+const COLORS = { table: RED, cell: RED };
 const WIDTH = { table: 5, cell: 2.5 };
 const $ = id => document.getElementById(id);
 let currentFile = null;
@@ -125,7 +126,7 @@ function draw() {
     const ctx = p.ctx;
     const b = t.bbox;
 
-    // each cell: dark rectangle
+    // each cell: red rectangle (separator lines between cells)
     if (showCells) {
       ctx.lineWidth = WIDTH.cell;
       ctx.strokeStyle = COLORS.cell;
