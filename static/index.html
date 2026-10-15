@@ -24,8 +24,6 @@
   <input type="file" id="file" accept="application/pdf">
   <button id="detect" disabled>Detect Tables</button>
   <label><input type="checkbox" id="showCells" checked><span class="sw" style="background:#111"></span>Cells</label>
-  <label><input type="checkbox" id="showRows" checked><span class="sw" style="background:#2e7d32"></span>Rows</label>
-  <label><input type="checkbox" id="showCols" checked><span class="sw" style="background:#d81b60"></span>Columns</label>
   <label><input type="checkbox" id="showLabels" checked><span class="sw" style="background:#e53935"></span>Labels</label>
   <span id="status">Choose a PDF to begin.</span>
 </header>
@@ -37,15 +35,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs";
 
 const SCALE = 1.5;
-const COLORS = {
-  table: "#e53935",
-  cell: "#111111",
-  merged: "rgba(255,193,7,0.22)",
-  row: "#2e7d32",
-  col: "#d81b60",
-};
-const WIDTH = { table: 5, cell: 3, row: 4, col: 4 };
-const DASH = [14, 6];
+const COLORS = { table: "#e53935", cell: "#111111" };
+const WIDTH = { table: 5, cell: 2.5 };
 const $ = id => document.getElementById(id);
 let currentFile = null;
 let pageInfo = [];
@@ -111,28 +102,7 @@ $("detect").addEventListener("click", async () => {
   }
 });
 
-["showCells", "showRows", "showCols", "showLabels"]
-  .forEach(id => $(id).addEventListener("change", draw));
-
-// Row / column boundaries (in PDF points) derived from the cells
-function gridLines(table) {
-  const rowTop = {}, rowBottom = {}, colLeft = {}, colRight = {};
-  for (const c of table.cells) {
-    const b = c.bbox;
-    const r0 = c.row, r1 = c.row + c.rowspan - 1;
-    const c0 = c.column, c1 = c.column + c.colspan - 1;
-    rowTop[r0]    = Math.min(rowTop[r0] ?? Infinity, b.top);
-    rowBottom[r1] = Math.max(rowBottom[r1] ?? -Infinity, b.bottom);
-    colLeft[c0]   = Math.min(colLeft[c0] ?? Infinity, b.x0);
-    colRight[c1]  = Math.max(colRight[c1] ?? -Infinity, b.x1);
-  }
-  const rows = Object.keys(rowTop).map(Number).sort((a, b) => a - b);
-  const cols = Object.keys(colLeft).map(Number).sort((a, b) => a - b);
-  return {
-    rows: rows.map(r => ({ i: r, top: rowTop[r], bottom: rowBottom[r] ?? rowTop[r] })),
-    cols: cols.map(c => ({ i: c, left: colLeft[c], right: colRight[c] ?? colLeft[c] })),
-  };
-}
+["showCells", "showLabels"].forEach(id => $(id).addEventListener("change", draw));
 
 function tag(ctx, text, x, y, color) {
   ctx.font = "bold 14px sans-serif";
@@ -146,8 +116,7 @@ function tag(ctx, text, x, y, color) {
 function draw() {
   pageInfo.forEach(p => p.ctx.clearRect(0, 0, p.w, p.h));
   if (!lastResult) return;
-  const showCells = $("showCells").checked, showRows = $("showRows").checked;
-  const showCols = $("showCols").checked, showLabels = $("showLabels").checked;
+  const showCells = $("showCells").checked, showLabels = $("showLabels").checked;
   const s = SCALE;
 
   for (const t of lastResult.tables) {
@@ -156,64 +125,19 @@ function draw() {
     const ctx = p.ctx;
     const b = t.bbox;
 
-    // 1) merged-cell tint + dark cell outlines
+    // each cell: dark rectangle
     if (showCells) {
+      ctx.lineWidth = WIDTH.cell;
+      ctx.strokeStyle = COLORS.cell;
+      ctx.setLineDash([]);
       for (const c of t.cells) {
         const cb = c.bbox;
-        const x = cb.x0 * s, y = cb.top * s;
-        const w = (cb.x1 - cb.x0) * s, h = (cb.bottom - cb.top) * s;
-        if (c.is_merged) { ctx.fillStyle = COLORS.merged; ctx.fillRect(x, y, w, h); }
-        ctx.lineWidth = WIDTH.cell;
-        ctx.strokeStyle = COLORS.cell;
-        ctx.strokeRect(x, y, w, h);
+        ctx.strokeRect(cb.x0 * s, cb.top * s,
+                       (cb.x1 - cb.x0) * s, (cb.bottom - cb.top) * s);
       }
     }
 
-    const g = gridLines(t);
-
-    // 2) row boundaries (green, dashed)
-    if (showRows) {
-      ctx.save();
-      ctx.lineWidth = WIDTH.row;
-      ctx.strokeStyle = COLORS.row;
-      ctx.setLineDash(DASH);
-      const ys = new Set();
-      g.rows.forEach(r => { ys.add(r.top); ys.add(r.bottom); });
-      for (const y of ys) {
-        ctx.beginPath();
-        ctx.moveTo(b.x0 * s, y * s);
-        ctx.lineTo(b.x1 * s, y * s);
-        ctx.stroke();
-      }
-      ctx.restore();
-      if (showLabels) {
-        g.rows.forEach(r => tag(ctx, "R" + (r.i + 1),
-          Math.max(0, b.x0 * s - 38), ((r.top + r.bottom) / 2) * s - 9, COLORS.row));
-      }
-    }
-
-    // 3) column boundaries (magenta, dashed)
-    if (showCols) {
-      ctx.save();
-      ctx.lineWidth = WIDTH.col;
-      ctx.strokeStyle = COLORS.col;
-      ctx.setLineDash(DASH);
-      const xs = new Set();
-      g.cols.forEach(c => { xs.add(c.left); xs.add(c.right); });
-      for (const x of xs) {
-        ctx.beginPath();
-        ctx.moveTo(x * s, b.top * s);
-        ctx.lineTo(x * s, b.bottom * s);
-        ctx.stroke();
-      }
-      ctx.restore();
-      if (showLabels) {
-        g.cols.forEach(c => tag(ctx, "C" + (c.i + 1),
-          ((c.left + c.right) / 2) * s - 12, b.bottom * s + 4, COLORS.col));
-      }
-    }
-
-    // 4) table box (red) + label
+    // overall table box
     ctx.lineWidth = WIDTH.table;
     ctx.strokeStyle = COLORS.table;
     ctx.strokeRect(b.x0 * s, b.top * s, (b.x1 - b.x0) * s, (b.bottom - b.top) * s);
