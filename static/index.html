@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PDF Table Detector</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #eceff1; }
+  header { position: sticky; top: 0; z-index: 10; background: #263238; color: #fff;
+           padding: 10px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  button { padding: 7px 14px; border: 0; border-radius: 4px; background: #1e88e5;
+           color: #fff; cursor: pointer; font-size: 14px; }
+  button:disabled { background: #78909c; cursor: not-allowed; }
+  label { font-size: 13px; }
+  #status { font-size: 13px; opacity: .9; }
+  #pages { padding: 16px; display: flex; flex-direction: column; align-items: center; gap: 16px; }
+  .page { position: relative; box-shadow: 0 2px 8px rgba(0,0,0,.3); background: #fff; }
+  .page canvas { display: block; }
+  .page canvas.overlay { position: absolute; left: 0; top: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<header>
+  <input type="file" id="file" accept="application/pdf">
+  <button id="detect" disabled>Detect Tables</button>
+  <label><input type="checkbox" id="showCells" checked> Cells</label>
+  <label><input type="checkbox" id="showLabels" checked> Labels</label>
+  <span id="status">Choose a PDF to begin.</span>
+</header>
+<div id="pages"></div>
+
+<script type="module">
+import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.min.mjs";
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs";
+
+const SCALE = 1.5;
+const $ = id => document.getElementById(id);
+let currentFile = null;
+let pageInfo = [];
+let lastResult = null;
+
+$("file").addEventListener("change", async e => {
+  currentFile = e.target.files[0];
+  if (!currentFile) return;
+  lastResult = null;
+  $("detect").disabled = true;
+  $("status").textContent = "Rendering pages…";
+  await renderPdf(await currentFile.arrayBuffer());
+  $("detect").disabled = false;
+  $("status").textContent = `${pageInfo.length} page(s) loaded. Click "Detect Tables".`;
+});
+
+async function renderPdf(buffer) {
+  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+  const container = $("pages");
+  container.innerHTML = "";
+  pageInfo = [];
+
+  for (let n = 1; n <= pdf.numPages; n++) {
+    const page = await pdf.getPage(n);
+    const vp = page.getViewport({ scale: SCALE });
+    const wrap = document.createElement("div");
+    wrap.className = "page";
+    wrap.style.width = vp.width + "px";
+    wrap.style.height = vp.height + "px";
+
+    const canvas = document.createElement("canvas");
+    canvas.width = vp.width; canvas.height = vp.height;
+    const overlay = document.createElement("canvas");
+    overlay.className = "overlay";
+    overlay.width = vp.width; overlay.height = vp.height;
+
+    wrap.append(canvas, overlay);
+    container.appendChild(wrap);
+    await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
+    pageInfo.push({ ctx: overlay.getContext("2d"), w: vp.width, h: vp.height });
+  }
+}
+
+$("detect").addEventListener("click", async () => {
+  if (!currentFile) return;
+  $("detect").disabled = true;
+  $("status").textContent = "Detecting tables…";
+  const fd = new FormData();
+  fd.append("file", currentFile);
+  try {
+    const res = await fetch("/api/detect", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    lastResult = data;
+    draw();
+    $("status").textContent = data.tables.length
+      ? `Found ${data.tables.length} table(s).`
+      : "No tables found.";
+  } catch (err) {
+    $("status").textContent = "Error: " + err.message;
+  } finally {
+    $("detect").disabled = false;
+  }
+});
+
+["showCells", "showLabels"].forEach(id => $(id).addEventListener("change", draw));
+
+function draw() {
+  pageInfo.forEach(p => p.ctx.clearRect(0, 0, p.w, p.h));
+  if (!lastResult) return;
+  const showCells = $("showCells").checked, showLabels = $("showLabels").checked;
+  const s = SCALE;
+
+  for (const t of lastResult.tables) {
+    const p = pageInfo[t.page_number - 1];
+    if (!p) continue;
+    const ctx = p.ctx;
+
+    if (showCells) {
+      ctx.lineWidth = 1;
+      for (const c of t.cells) {
+        const b = c.bbox;
+        ctx.fillStyle = c.is_merged ? "rgba(255,193,7,0.18)" : "rgba(30,136,229,0.10)";
+        ctx.strokeStyle = "rgba(30,136,229,0.9)";
+        ctx.fillRect(b.x0 * s, b.top * s, (b.x1 - b.x0) * s, (b.bottom - b.top) * s);
+        ctx.strokeRect(b.x0 * s, b.top * s, (b.x1 - b.x0) * s, (b.bottom - b.top) * s);
+      }
+    }
+
+    const b = t.bbox;
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = "#e53935";
+    ctx.strokeRect(b.x0 * s, b.top * s, (b.x1 - b.x0) * s, (b.bottom - b.top) * s);
+
+    if (showLabels) {
+      const label = `${t.table_id}  ${t.row_count}×${t.column_count}`;
+      ctx.font = "bold 12px sans-serif";
+      const w = ctx.measureText(label).width + 8;
+      const y = Math.max(0, b.top * s - 18);
+      ctx.fillStyle = "#e53935";
+      ctx.fillRect(b.x0 * s, y, w, 18);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(label, b.x0 * s + 4, y + 13);
+    }
+  }
+}
+</script>
+</body>
+</html>
