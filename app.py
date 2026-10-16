@@ -30,8 +30,9 @@ def detect():
         f.save(pdf_path)
         try:
             result = pdf_tables_to_json(pdf_path, out_path)
-            # drop paragraphs/lists first so they are never extended
-            filter_false_tables(result)
+            # drop paragraphs/lists first so they are never extended;
+            # pdf_path lets the filter keep tables that have a real drawn grid
+            filter_false_tables(result, pdf_path)
             extend_header_tables(pdf_path, result)
             extend_tables_upward(pdf_path, result)
             merge_vertical_header_cells(pdf_path, result)
