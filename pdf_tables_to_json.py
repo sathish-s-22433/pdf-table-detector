@@ -28,8 +28,10 @@ PAD = 3
 # Validation
 MIN_CELLS = 2                    # a table needs at least 2 cells
 MIN_TEXT_CELLS = 2               # ...and at least 2 cells with text
-MIN_FILL_RULED = 0.25            # only enforced for tables with >= FILL_CHECK_ROWS rows
+MIN_FILL_RULED = 0.05            # only enforced for irregular grids (see REGULAR_GRID_RATIO)
 FILL_CHECK_ROWS = 3
+REGULAR_GRID_RATIO = 0.7         # share of plain 1x1 cells that marks a regular grid
+MIN_BORDER_SIDES_EMPTY = 3       # an empty cell needs >= 3 real border sides to be kept
 MIN_FILL_BORDERLESS = 0.50
 MIN_ROWS_BORDERLESS = 3
 MAX_AVG_CELL_CHARS_BORDERLESS = 120
@@ -247,6 +249,18 @@ def clean_axis(candidates, segments, lo, hi):
     return out
 
 
+def border_sides(h_edges, v_edges, cb):
+    """How many of the 4 sides of a cell box are covered by a real border."""
+    x0, t, x1, b = cb
+    sides = (
+        covered_ratio(h_edges, t, x0, x1) >= BORDER_COVERAGE,
+        covered_ratio(h_edges, b, x0, x1) >= BORDER_COVERAGE,
+        covered_ratio(v_edges, x0, t, b) >= BORDER_COVERAGE,
+        covered_ratio(v_edges, x1, t, b) >= BORDER_COVERAGE,
+    )
+    return sum(sides)
+
+
 # ----------------------------------------------------------------------
 # Builder A: border-based grid
 # ----------------------------------------------------------------------
@@ -286,10 +300,18 @@ def build_from_edges(page, bbox):
         r0 = min(r for r, _ in slots); r1 = max(r for r, _ in slots)
         c0 = min(c for _, c in slots); c1 = max(c for _, c in slots)
         cb = (xs[c0], ys[r0], xs[c1 + 1], ys[r1 + 1])
+        text = cell_text(page, cb)
+
+        # Phantom cell: an empty area that is only partly enclosed by borders,
+        # e.g. the blank top-left corner of a table whose header starts at the
+        # second column. It is not a real cell, so it is dropped.
+        if text is None and border_sides(h_edges, v_edges, cb) < MIN_BORDER_SIDES_EMPTY:
+            continue
+
         cells.append({
             "row": r0, "column": c0,
             "rowspan": r1 - r0 + 1, "colspan": c1 - c0 + 1,
-            "text": cell_text(page, cb),
+            "text": text,
             "_bbox": cb,
         })
     return {"n_rows": n_rows, "n_cols": n_cols, "cells": cells,
@@ -519,6 +541,15 @@ def finalize(built, page_num, idx, strategy):
     }
 
 
+def _is_regular_grid(tbl):
+    """Mostly plain 1x1 cells in a table with >= 2 rows and columns."""
+    cells = tbl["cells"]
+    if not cells or tbl["row_count"] < 2 or tbl["column_count"] < 2:
+        return False
+    singles = sum(1 for c in cells if c["rowspan"] == 1 and c["colspan"] == 1)
+    return singles / len(cells) >= REGULAR_GRID_RATIO
+
+
 def reject_reason(tbl):
     """None if valid, otherwise the reason. Single-row/column tables are allowed."""
     n_rows, n_cols = tbl["row_count"], tbl["column_count"]
@@ -541,9 +572,11 @@ def reject_reason(tbl):
             return f"fill ratio {tbl['fill_ratio']} < {MIN_FILL_BORDERLESS}"
         if sum(len(t) for t in texts) / len(texts) > MAX_AVG_CELL_CHARS_BORDERLESS:
             return "looks like a paragraph"
-    elif n_rows >= FILL_CHECK_ROWS and tbl["fill_ratio"] < MIN_FILL_RULED:
-        # empty form fields are normal in short tables, so only large ones are checked
-        return f"fill ratio {tbl['fill_ratio']} < {MIN_FILL_RULED}"
+    elif (n_rows >= FILL_CHECK_ROWS and tbl["fill_ratio"] < MIN_FILL_RULED
+          and not _is_regular_grid(tbl)):
+        # Empty form / data-entry grids are normal when the grid is regular.
+        # Only sparse AND irregular ruled regions are rejected.
+        return f"fill ratio {tbl['fill_ratio']} < {MIN_FILL_RULED} on an irregular grid"
     return None
 
 
