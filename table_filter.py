@@ -9,20 +9,18 @@ cells (e.g. a 'Packet Switching | Circuit Switching' comparison). What tells
 them apart is the ruling: a real table has drawn lines that form a grid,
 especially a vertical divider between columns running most of the table height.
 
-filter_false_tables() therefore uses two kinds of evidence:
-  * text rules   (single column, bullet column, long prose in few columns)
-  * border rules (internal vertical divider + horizontal rules = real grid)
-
-A table with a real grid is never rejected by the bullet/prose rules.
-Rejected tables are listed in result["rejected_tables"] with the reason.
-
-Rules
+Order of rules (first match wins)
+  0. real grid              an inner vertical divider + horizontal rules drawn
+                            across the table  ->  ALWAYS KEEP
   1. single column          one column of text lines = paragraph or list
-                            (always rejected, even if boxed)
   2. bullet list            2 columns, first column only bullet glyphs
-                            (skipped when a real grid is present)
   3. long prose, few cols   <= 2 columns, very long text cells
-                            (skipped when a real grid is present)
+
+The grid check now runs FIRST and joins line SEGMENTS: Word/Office PDFs draw a
+column divider as many short pieces (one per row), so no single piece spans
+the table. Pieces on the same x position are merged before measuring.
+
+Rejected tables are listed in result["rejected_tables"] with the reason.
 """
 import re
 
@@ -34,10 +32,11 @@ PROSE_AVG_CHARS = 70           # average characters per text cell
 PROSE_WORDS_PER_CELL = 9       # ... or average words per cell
 
 # real-grid evidence
-SPAN_FRACTION = 0.7            # a divider must cover this share of the table
-DIVIDER_MARGIN = 10.0          # divider must be this far from the left/right side
+SPAN_FRACTION = 0.6            # merged divider/rule must cover this share
+DIVIDER_MARGIN = 10.0          # divider must be this far from left/right side
 MIN_H_RULES = 2                # horizontal rules spanning the table width
-POS_TOL = 2.5
+POS_TOL = 2.5                  # lines this close share one position
+GAP_TOL = 4.0                  # segments closer than this are joined
 
 BULLET_RE = re.compile(r"^[\u2022\u00b7\u25aa\u25cf\u25cb\u25a0\u25a1\u25e6\u2023\u2043\-\u2013\u2014*o]$")
 
@@ -47,18 +46,35 @@ def _texts(table, column=None):
             if c["text"] and (column is None or c["column"] == column)]
 
 
-def _distinct(values, tol=POS_TOL):
-    out = []
-    for v in sorted(values):
-        if not out or v - out[-1] > tol:
-            out.append(v)
-    return out
+def _group_by_position(segments):
+    """segments: (pos, start, end). Group those whose pos is within POS_TOL."""
+    groups = []
+    for pos, s, e in sorted(segments):
+        if groups and pos - groups[-1]["pos"] <= POS_TOL:
+            g = groups[-1]
+            g["spans"].append((s, e))
+        else:
+            groups.append({"pos": pos, "spans": [(s, e)]})
+    return groups
+
+
+def _joined_length(spans, lo, hi):
+    """Total covered length inside [lo, hi] after joining nearby spans."""
+    covered, end = 0.0, lo
+    for s, e in sorted((max(s, lo), min(e, hi)) for s, e in spans):
+        if e <= s:
+            continue
+        s = max(s, end - GAP_TOL if end > lo else s)
+        if e > end:
+            covered += e - max(s, end) if s < end else e - s
+            end = e
+    return covered
 
 
 def has_real_grid(page, table):
-    """True when drawn lines form a grid: at least one vertical divider
-    strictly inside the table spanning most of its height, and at least
-    MIN_H_RULES horizontal rules spanning most of its width."""
+    """True when drawn lines form a grid: an inner vertical divider covering
+    most of the table height AND >= MIN_H_RULES horizontal rules covering most
+    of its width. Segments on the same line are joined first."""
     b = table["bbox"]
     x0, x1, top, bottom = b["x0"], b["x1"], b["top"], b["bottom"]
     height, width = bottom - top, x1 - x0
@@ -66,36 +82,33 @@ def has_real_grid(page, table):
         return False
     pad = 4.0
 
-    v_inner, h_rules = [], []
+    v_seg, h_seg = [], []
     for e in page.edges:
         if e["orientation"] == "v":
-            if e["x0"] < x0 - pad or e["x0"] > x1 + pad:
-                continue
-            lo, hi = max(e["top"], top), min(e["bottom"], bottom)
-            if hi - lo >= SPAN_FRACTION * height and \
-                    x0 + DIVIDER_MARGIN <= e["x0"] <= x1 - DIVIDER_MARGIN:
-                v_inner.append(e["x0"])
+            if x0 + DIVIDER_MARGIN <= e["x0"] <= x1 - DIVIDER_MARGIN:
+                v_seg.append((e["x0"], e["top"], e["bottom"]))
         elif e["orientation"] == "h":
-            if e["top"] < top - pad or e["top"] > bottom + pad:
-                continue
-            lo, hi = max(e["x0"], x0), min(e["x1"], x1)
-            if hi - lo >= SPAN_FRACTION * width:
-                h_rules.append(e["top"])
+            if top - pad <= e["top"] <= bottom + pad:
+                h_seg.append((e["top"], e["x0"], e["x1"]))
 
-    return bool(_distinct(v_inner)) and len(_distinct(h_rules)) >= MIN_H_RULES
+    dividers = [g for g in _group_by_position(v_seg)
+                if _joined_length(g["spans"], top, bottom) >= SPAN_FRACTION * height]
+    rules = [g for g in _group_by_position(h_seg)
+             if _joined_length(g["spans"], x0, x1) >= SPAN_FRACTION * width]
+    return bool(dividers) and len(rules) >= MIN_H_RULES
 
 
 def reject_reason(table, page=None):
     """Reason string if `table` is really a paragraph/list, else None."""
     n_cols = table["column_count"]
 
+    # 0. drawn grid lines = genuine table, whatever the cell text looks like
+    if page is not None and has_real_grid(page, table):
+        return None
+
     # 1. one column = text lines, not a table
     if n_cols < MIN_COLUMNS:
         return "single column (paragraph or list)"
-
-    # Drawn grid lines mean a genuine table, whatever the cell text looks like.
-    if page is not None and has_real_grid(page, table):
-        return None
 
     # 2. bullet column + text column
     if n_cols == 2:
@@ -128,6 +141,7 @@ def filter_false_tables(result, pdf_path=None):
                 rejected.append({"table_id": t["table_id"],
                                  "page_number": t["page_number"],
                                  "bbox": t["bbox"], "reason": reason})
+                print(f"[page {t['page_number']}] filtered {t['table_id']}: {reason}")
             else:
                 kept.append(t)
     finally:
