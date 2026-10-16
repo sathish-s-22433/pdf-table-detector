@@ -4,6 +4,7 @@ import tempfile
 from flask import Flask, jsonify, request, send_from_directory
 
 from pdf_tables_to_json import pdf_tables_to_json
+from table_filter import filter_false_tables
 from table_postprocess import merge_vertical_header_cells
 from table_extend import extend_header_tables
 from table_extend_up import extend_tables_upward
@@ -29,6 +30,8 @@ def detect():
         f.save(pdf_path)
         try:
             result = pdf_tables_to_json(pdf_path, out_path)
+            # drop paragraphs/lists first so they are never extended
+            filter_false_tables(result)
             extend_header_tables(pdf_path, result)
             extend_tables_upward(pdf_path, result)
             merge_vertical_header_cells(pdf_path, result)
