@@ -5,6 +5,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from pdf_tables_to_json import pdf_tables_to_json
 from table_postprocess import merge_vertical_header_cells
+from table_extend import extend_header_tables
 
 app = Flask(__name__, static_folder="static")
 app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # 30 MB
@@ -28,6 +29,7 @@ def detect():
         try:
             result = pdf_tables_to_json(pdf_path, out_path)
             merge_vertical_header_cells(pdf_path, result)
+            extend_header_tables(pdf_path, result)
         except Exception as e:
             return jsonify(error=f"Detection failed: {e}"), 500
 
